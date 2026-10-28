@@ -1,0 +1,796 @@
+
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>信号機シミュレーター</title>
+
+<style>
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: sans-serif;
+  background: #f0f2f5;
+  color: #222;
+}
+
+header {
+  background: #263238;
+  color: white;
+  text-align: center;
+  padding: 18px;
+}
+
+h1 {
+  margin: 0;
+  font-size: 24px;
+}
+
+main {
+  max-width: 1000px;
+  margin: 20px auto;
+  padding: 0 12px;
+}
+
+.panel {
+  background: white;
+  padding: 16px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+  box-shadow: 0 2px 6px #0001;
+}
+
+.settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  align-items: end;
+}
+
+label {
+  display: block;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+input {
+  width: 120px;
+  max-width: 100%;
+  padding: 8px;
+  font-size: 16px;
+}
+
+button {
+  padding: 10px 16px;
+  border: none;
+  border-radius: 7px;
+  background: #1976d2;
+  color: white;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+button:hover {
+  opacity: 0.85;
+}
+
+button.reset {
+  background: #616161;
+}
+
+.status {
+  display: flex;
+  justify-content: space-around;
+  gap: 12px;
+  flex-wrap: wrap;
+  text-align: center;
+}
+
+.status strong {
+  display: block;
+  font-size: 20px;
+  margin-top: 6px;
+}
+
+.green { color: #16843b; }
+.yellow { color: #d69b00; }
+.red { color: #d32f2f; }
+
+canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #75ad60;
+  border-radius: 10px;
+}
+
+.hint {
+  font-size: 13px;
+  color: #666;
+  line-height: 1.7;
+}
+</style>
+</head>
+
+<body>
+<header>
+  <h1>🚦 信号機シミュレーター</h1>
+</header>
+
+<main>
+  <section class="panel">
+    <h2>信号・車の設定</h2>
+
+    <div class="settings">
+      <div>
+        <label for="nsTime">南北の青信号（秒）</label>
+        <input id="nsTime" type="number"
+               min="1" max="3600" value="15">
+      </div>
+
+      <div>
+        <label for="ewTime">東西の青信号（秒）</label>
+        <input id="ewTime" type="number"
+               min="1" max="3600" value="10">
+      </div>
+
+      <div>
+        <label for="speed">車の速度</label>
+        <input id="speed" type="number"
+               min="10" max="200" value="60">
+      </div>
+
+      <div>
+        <label for="density">各方向の生成間隔（秒）</label>
+        <input id="density" type="number"
+               min="0.3" max="10" step="0.1" value="2.5">
+      </div>
+
+      <button id="startBtn">▶ 開始</button>
+      <button id="pauseBtn">⏸ 一時停止</button>
+      <button id="resetBtn" class="reset">↻ リセット</button>
+    </div>
+
+    <p class="hint">
+      青信号の後は黄色信号が3秒間点灯します。
+      赤・黄色になった方向の車も停止線までは進み、停止線で待機します。
+      交差点に進入済みの車は、そのまま通過します。
+      車は全方向から生成されます。
+      生成間隔を小さくすると車が増えます。
+    </p>
+  </section>
+
+  <section class="panel status">
+    <div>
+      南北方向
+      <strong id="nsStatus" class="green">青</strong>
+    </div>
+
+    <div>
+      東西方向
+      <strong id="ewStatus" class="red">赤</strong>
+    </div>
+
+    <div>
+      残り時間
+      <strong id="timer">15.0 秒</strong>
+    </div>
+
+    <div>
+      画面内の車
+      <strong id="carCount">0 台</strong>
+    </div>
+  </section>
+
+  <section class="panel">
+    <canvas id="road" width="900" height="600"></canvas>
+  </section>
+</main>
+
+<script>
+const canvas = document.getElementById("road");
+const ctx = canvas.getContext("2d");
+
+const nsInput = document.getElementById("nsTime");
+const ewInput = document.getElementById("ewTime");
+const speedInput = document.getElementById("speed");
+const densityInput = document.getElementById("density");
+
+const nsStatus = document.getElementById("nsStatus");
+const ewStatus = document.getElementById("ewStatus");
+const timerText = document.getElementById("timer");
+const carCountText = document.getElementById("carCount");
+
+const W = canvas.width;
+const H = canvas.height;
+const CX = W / 2;
+const CY = H / 2;
+
+const ROAD_W = 220;
+const HALF_ROAD = ROAD_W / 2;
+const STOP = HALF_ROAD + 8;
+
+const CAR_LENGTH = 44;
+const CAR_WIDTH = 25;
+
+const YELLOW_TIME = 3;
+const SPEED_MULTIPLIER = 2.2;
+
+let group = "NS";
+let light = "GREEN";
+let remaining = 15;
+
+let running = false;
+let cars = [];
+let lastTime = 0;
+let animationId = null;
+
+// 各方向に独立した車生成タイマーを用意
+const directions = ["up", "down", "left", "right"];
+const spawnTimers = {
+  up: 0,
+  down: 0,
+  left: 0,
+  right: 0
+};
+
+const colors = [
+  "#e53935",
+  "#fdd835",
+  "#1e88e5",
+  "#eeeeee",
+  "#212121",
+  "#8e24aa",
+  "#fb8c00",
+  "#26a69a"
+];
+
+function lanePosition(dir) {
+  if (dir === "up") return CX + 35;
+  if (dir === "down") return CX - 35;
+  if (dir === "left") return CY - 35;
+  return CY + 35;
+}
+
+// 信号の状態を方向別に取得
+function signalState(dir) {
+  const isNS = dir === "up" || dir === "down";
+
+  if (isNS && group === "NS") return light;
+  if (!isNS && group === "EW") return light;
+
+  return "RED";
+}
+
+function signalIsGreen(dir) {
+  return signalState(dir) === "GREEN";
+}
+
+// 車体の前端から停止線までの距離
+function distanceToStop(car) {
+  if (car.dir === "up") {
+    return car.y - CAR_LENGTH / 2 - (CY + STOP);
+  }
+
+  if (car.dir === "down") {
+    return (CY - STOP) - (car.y + CAR_LENGTH / 2);
+  }
+
+  if (car.dir === "left") {
+    return car.x - CAR_LENGTH / 2 - (CX + STOP);
+  }
+
+  return (CX - STOP) - (car.x + CAR_LENGTH / 2);
+}
+
+// 車の前端が交差点の入口に到達したか
+function hasReachedIntersection(car) {
+  if (car.dir === "up") {
+    return car.y - CAR_LENGTH / 2 <= CY + HALF_ROAD;
+  }
+
+  if (car.dir === "down") {
+    return car.y + CAR_LENGTH / 2 >= CY - HALF_ROAD;
+  }
+
+  if (car.dir === "left") {
+    return car.x - CAR_LENGTH / 2 <= CX + HALF_ROAD;
+  }
+
+  return car.x + CAR_LENGTH / 2 >= CX - HALF_ROAD;
+}
+
+function createCar(dir) {
+  const car = {
+    dir,
+    x: 0,
+    y: 0,
+    speed: Number(speedInput.value) * SPEED_MULTIPLIER,
+    color: colors[Math.floor(Math.random() * colors.length)],
+
+    // 交差点への進入が許可され、実際に進入したらtrue
+    entered: false
+  };
+
+  if (dir === "up") {
+    car.x = lanePosition(dir);
+    car.y = H + CAR_LENGTH;
+  } else if (dir === "down") {
+    car.x = lanePosition(dir);
+    car.y = -CAR_LENGTH;
+  } else if (dir === "left") {
+    car.x = W + CAR_LENGTH;
+    car.y = lanePosition(dir);
+  } else {
+    car.x = -CAR_LENGTH;
+    car.y = lanePosition(dir);
+  }
+
+  cars.push(car);
+}
+
+// 同じ車線の前方に別の車がいるか確認
+function getCarAhead(car) {
+  let nearest = null;
+  let nearestGap = Infinity;
+
+  for (const other of cars) {
+    if (other === car || other.dir !== car.dir) continue;
+
+    let gap;
+
+    if (car.dir === "up") {
+      gap = car.y - other.y;
+    } else if (car.dir === "down") {
+      gap = other.y - car.y;
+    } else if (car.dir === "left") {
+      gap = car.x - other.x;
+    } else {
+      gap = other.x - car.x;
+    }
+
+    if (gap > 0 && gap < nearestGap) {
+      nearestGap = gap;
+      nearest = other;
+    }
+  }
+
+  return nearest ? { car: nearest, gap: nearestGap } : null;
+}
+
+// 1台の車を移動させる
+function moveCar(car, dt) {
+  const state = signalState(car.dir);
+  const distance = distanceToStop(car);
+
+  // 赤・黄色で、まだ進入していない車は
+  // 停止線まで進んで停止する
+  let allowedStep = car.speed * dt;
+
+  if (!car.entered && state !== "GREEN") {
+    if (distance <= 0) {
+      allowedStep = 0;
+    } else {
+      // 停止線を越えないよう移動距離を制限
+      allowedStep = Math.min(allowedStep, distance);
+    }
+  }
+
+  // 前の車との車間距離を確保
+  const ahead = getCarAhead(car);
+
+  if (ahead) {
+    const safeGap = CAR_LENGTH + 10;
+    const available = ahead.gap - safeGap;
+
+    allowedStep = Math.min(
+      allowedStep,
+      Math.max(0, available)
+    );
+  }
+
+  // 車を移動
+  if (car.dir === "up") car.y -= allowedStep;
+  if (car.dir === "down") car.y += allowedStep;
+  if (car.dir === "left") car.x -= allowedStep;
+  if (car.dir === "right") car.x += allowedStep;
+
+  // 青信号のときだけ、新しく交差点へ進入できる
+  if (
+    !car.entered &&
+    signalIsGreen(car.dir) &&
+    hasReachedIntersection(car)
+  ) {
+    car.entered = true;
+  }
+}
+
+function moveCars(dt) {
+  // 先頭車から順番に処理することで車間距離を保ちやすくする
+  const ordered = [...cars].sort((a, b) => {
+    if (a.dir !== b.dir) {
+      return directions.indexOf(a.dir) -
+             directions.indexOf(b.dir);
+    }
+
+    if (a.dir === "up") return a.y - b.y;
+    if (a.dir === "down") return b.y - a.y;
+    if (a.dir === "left") return a.x - b.x;
+
+    return b.x - a.x;
+  });
+
+  for (const car of ordered) {
+    moveCar(car, dt);
+  }
+
+  // 画面外に出た車を削除
+  cars = cars.filter(car =>
+    car.x > -100 &&
+    car.x < W + 100 &&
+    car.y > -100 &&
+    car.y < H + 100
+  );
+}
+
+// 全方向で独立して車を生成する
+function spawnCars(dt) {
+  const interval = Number(densityInput.value);
+
+  for (const dir of directions) {
+    spawnTimers[dir] += dt;
+
+    if (spawnTimers[dir] < interval) continue;
+
+    // 生成タイマーを進める
+    spawnTimers[dir] -= interval;
+
+    // 入口付近に車がいる場合は生成を少し待つ
+    const blocked = cars.some(car => {
+      if (car.dir !== dir) return false;
+
+      if (dir === "up") return car.y > H - 90;
+      if (dir === "down") return car.y < 90;
+      if (dir === "left") return car.x > W - 90;
+
+      return car.x < 90;
+    });
+
+    if (!blocked) {
+      createCar(dir);
+    }
+  }
+}
+
+function drawRoad() {
+  ctx.clearRect(0, 0, W, H);
+
+  // 草地
+  ctx.fillStyle = "#75ad60";
+  ctx.fillRect(0, 0, W, H);
+
+  // 道路
+  ctx.fillStyle = "#484848";
+  ctx.fillRect(CX - HALF_ROAD, 0, ROAD_W, H);
+  ctx.fillRect(0, CY - HALF_ROAD, W, ROAD_W);
+
+  // 中央線
+  ctx.strokeStyle = "#f8e8a0";
+  ctx.lineWidth = 3;
+  ctx.setLineDash([20, 16]);
+
+  ctx.beginPath();
+
+  ctx.moveTo(CX, 0);
+  ctx.lineTo(CX, CY - HALF_ROAD);
+
+  ctx.moveTo(CX, CY + HALF_ROAD);
+  ctx.lineTo(CX, H);
+
+  ctx.moveTo(0, CY);
+  ctx.lineTo(CX - HALF_ROAD, CY);
+
+  ctx.moveTo(CX + HALF_ROAD, CY);
+  ctx.lineTo(W, CY);
+
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // 停止線
+  ctx.strokeStyle = "white";
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+
+  ctx.moveTo(CX - HALF_ROAD, CY + STOP);
+  ctx.lineTo(CX + HALF_ROAD, CY + STOP);
+
+  ctx.moveTo(CX - HALF_ROAD, CY - STOP);
+  ctx.lineTo(CX + HALF_ROAD, CY - STOP);
+
+  ctx.moveTo(CX + STOP, CY - HALF_ROAD);
+  ctx.lineTo(CX + STOP, CY + HALF_ROAD);
+
+  ctx.moveTo(CX - STOP, CY - HALF_ROAD);
+  ctx.lineTo(CX - STOP, CY + HALF_ROAD);
+
+  ctx.stroke();
+
+  // 方角
+  ctx.fillStyle = "white";
+  ctx.font = "bold 18px sans-serif";
+  ctx.textAlign = "center";
+
+  ctx.fillText("北", CX, 25);
+  ctx.fillText("南", CX, H - 10);
+  ctx.fillText("西", 25, CY - 95);
+  ctx.fillText("東", W - 25, CY - 95);
+}
+
+function drawLight(x, y, state, label) {
+  ctx.fillStyle = "#202020";
+  ctx.fillRect(x - 14, y - 37, 28, 74);
+
+  const lamps = [
+    { y: y - 23, color: "RED" },
+    { y: y, color: "YELLOW" },
+    { y: y + 23, color: "GREEN" }
+  ];
+
+  for (const lamp of lamps) {
+    ctx.beginPath();
+    ctx.arc(x, lamp.y, 9, 0, Math.PI * 2);
+
+    let color = "#252525";
+
+    if (state === lamp.color) {
+      if (lamp.color === "RED") color = "#ff2929";
+      if (lamp.color === "YELLOW") color = "#ffdf25";
+      if (lamp.color === "GREEN") color = "#25ee69";
+    }
+
+    ctx.fillStyle = color;
+    ctx.fill();
+  }
+
+  ctx.fillStyle = "white";
+  ctx.font = "11px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(label, x, y + 51);
+}
+
+function drawLights() {
+  drawLight(
+    CX - STOP - 30, CY - STOP - 42,
+    signalState("up"), "南北"
+  );
+
+  drawLight(
+    CX + STOP + 30, CY + STOP + 42,
+    signalState("down"), "南北"
+  );
+
+  drawLight(
+    CX + STOP + 30, CY - STOP - 42,
+    signalState("left"), "東西"
+  );
+
+  drawLight(
+    CX - STOP - 30, CY + STOP + 42,
+    signalState("right"), "東西"
+  );
+}
+
+function drawCar(car) {
+  ctx.save();
+  ctx.translate(car.x, car.y);
+
+  // 車の前方を右向きに描き、縦方向の車は回転する
+  if (car.dir === "up" || car.dir === "down") {
+    ctx.rotate(Math.PI / 2);
+  }
+
+  ctx.fillStyle = car.color;
+  ctx.beginPath();
+  ctx.roundRect(
+    -CAR_LENGTH / 2,
+    -CAR_WIDTH / 2,
+    CAR_LENGTH,
+    CAR_WIDTH,
+    5
+  );
+  ctx.fill();
+
+  // 窓
+  ctx.fillStyle = "#bde7f5";
+  ctx.fillRect(
+    1, -CAR_WIDTH / 2 + 3,
+    11, CAR_WIDTH - 6
+  );
+
+  ctx.fillStyle = "#a6d6e8";
+  ctx.fillRect(
+    -CAR_LENGTH / 2 + 5,
+    -CAR_WIDTH / 2 + 3,
+    8, CAR_WIDTH - 6
+  );
+
+  // 前照灯
+  ctx.fillStyle = "#fff8b0";
+  ctx.fillRect(
+    CAR_LENGTH / 2 - 4,
+    -CAR_WIDTH / 2 + 3,
+    3, 5
+  );
+  ctx.fillRect(
+    CAR_LENGTH / 2 - 4,
+    CAR_WIDTH / 2 - 8,
+    3, 5
+  );
+
+  // 後部灯
+  ctx.fillStyle = "#ff5252";
+  ctx.fillRect(
+    -CAR_LENGTH / 2,
+    -CAR_WIDTH / 2 + 3,
+    3, 5
+  );
+  ctx.fillRect(
+    -CAR_LENGTH / 2,
+    CAR_WIDTH / 2 - 8,
+    3, 5
+  );
+
+  ctx.restore();
+}
+
+function updateStatus() {
+  const ns = signalState("up");
+  const ew = signalState("left");
+
+  function label(state) {
+    if (state === "GREEN") return "青";
+    if (state === "YELLOW") return "黄";
+    return "赤";
+  }
+
+  function className(state) {
+    if (state === "GREEN") return "green";
+    if (state === "YELLOW") return "yellow";
+    return "red";
+  }
+
+  nsStatus.textContent = label(ns);
+  ewStatus.textContent = label(ew);
+
+  nsStatus.className = className(ns);
+  ewStatus.className = className(ew);
+
+  timerText.textContent = remaining.toFixed(1) + " 秒";
+  carCountText.textContent = cars.length + " 台";
+}
+
+function draw() {
+  drawRoad();
+  drawLights();
+
+  for (const car of cars) {
+    drawCar(car);
+  }
+
+  updateStatus();
+}
+
+function validSettings() {
+  const ns = Number(nsInput.value);
+  const ew = Number(ewInput.value);
+  const speed = Number(speedInput.value);
+  const density = Number(densityInput.value);
+
+  if (
+    !Number.isFinite(ns) || ns < 1 || ns > 3600 ||
+    !Number.isFinite(ew) || ew < 1 || ew > 3600 ||
+    !Number.isFinite(speed) || speed < 10 || speed > 200 ||
+    !Number.isFinite(density) || density < 0.3 || density > 10
+  ) {
+    alert(
+      "南北・東西の青信号は1〜3600秒、" +
+      "車の速度は10〜200、" +
+      "車の生成間隔は0.3〜10秒で設定してください。"
+    );
+    return false;
+  }
+
+  return true;
+}
+
+// 青 → 黄 → 反対方向が青
+function updateSignal(dt) {
+  remaining -= dt;
+
+  if (remaining > 0) return;
+
+  if (light === "GREEN") {
+    light = "YELLOW";
+    remaining = YELLOW_TIME;
+  } else {
+    group = group === "NS" ? "EW" : "NS";
+    light = "GREEN";
+
+    remaining = Number(
+      group === "NS" ? nsInput.value : ewInput.value
+    );
+  }
+}
+
+function reset() {
+  running = false;
+
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+
+  group = "NS";
+  light = "GREEN";
+  remaining = Number(nsInput.value) || 15;
+
+  cars = [];
+  lastTime = 0;
+
+  for (const dir of directions) {
+    spawnTimers[dir] = 0;
+  }
+
+  draw();
+}
+
+function loop(timestamp) {
+  if (!running) {
+    animationId = null;
+    return;
+  }
+
+  if (lastTime === 0) {
+    lastTime = timestamp;
+  }
+
+  const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+  lastTime = timestamp;
+
+  updateSignal(dt);
+  spawnCars(dt);
+  moveCars(dt);
+  draw();
+
+  animationId = requestAnimationFrame(loop);
+}
+
+document.getElementById("startBtn").addEventListener("click", () => {
+  if (!validSettings()) return;
+  if (running) return;
+
+  running = true;
+  lastTime = 0;
+  animationId = requestAnimationFrame(loop);
+});
+
+document.getElementById("pauseBtn").addEventListener("click", () => {
+  running = false;
+
+  if (animationId !== null) {
+    cancelAnimationFrame(animationId);
+    animationId = null;
+  }
+});
+
+document.getElementById("resetBtn").addEventListener("click", reset);
+
+// 初期表示
+draw();
+</script>
+</body>
+</html>
