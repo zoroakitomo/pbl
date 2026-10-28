@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>信号機時間配分 最適化シミュレーター</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Yu Gothic UI",Meiryo,sans-serif;color:#172033;background:#f3f6fb}
+*{box-sizing:border-box}body{margin:0;padding:20px}main{max-width:1100px;margin:auto}
+h1{font-size:clamp(1.4rem,3vw,2rem);margin:0 0 6px} .sub{color:#58657a;margin:0 0 18px}
+.layout{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(280px,1fr);gap:16px}
+.panel{background:white;border:1px solid #dce3ee;border-radius:16px;padding:16px;box-shadow:0 5px 20px #1d355710}
+canvas{display:block;width:100%;height:auto;border-radius:12px;background:#dce8d7}
+.controls{display:grid;gap:14px}.control label{display:flex;justify-content:space-between;gap:10px;font-weight:650;margin-bottom:6px}
+input[type=range]{width:100%;accent-color:#2868d7}
+.buttons{display:flex;flex-wrap:wrap;gap:8px}
+button{border:0;border-radius:10px;padding:10px 14px;font-weight:700;cursor:pointer;background:#e8edf5;color:#1c2a42}
+button.primary{background:#245fd1;color:white}button:disabled{opacity:.45;cursor:not-allowed}
+.metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.metric{background:#f5f8fc;border-radius:12px;padding:12px}.metric small{display:block;color:#66738a}.metric strong{font-size:1.35rem}
+.status{padding:10px 12px;background:#f5f8fc;border-radius:10px;margin:12px 0;font-weight:700}
+.note{font-size:.9rem;color:#657187;line-height:1.5}.results{display:grid;gap:8px;margin-top:10px}
+.result{display:flex;justify-content:space-between;gap:12px;padding:10px;border:1px solid #e1e7f0;border-radius:10px}
+.result.best{border-color:#16835b;background:#effaf5}
+table{width:100%;border-collapse:collapse;font-size:.9rem}td,th{text-align:right;padding:8px;border-bottom:1px solid #e5eaf1}td:first-child,th:first-child{text-align:left}
+@media(max-width:800px){body{padding:12px}.layout{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+  <h1>🚦 信号機時間配分 最適化シミュレーター</h1>
+  <p class="sub">仮想交差点で交通の流れを再現し、信号の時間配分による待ち時間の違いを比較します。</p>
+  <div class="layout">
+    <section class="panel">
+      <canvas id="scene" width="800" height="600" aria-label="交差点のシミュレーション"></canvas>
+      <div class="status" id="signalStatus">南北：青 ／ 東西：赤</div>
+      <div class="metrics">
+        <div class="metric"><small>シミュレーション時間</small><strong id="clock">0.0 秒</strong></div>
+        <div class="metric"><small>平均待ち時間</small><strong id="avgWait">0.0 秒</strong></div>
+        <div class="metric"><small>通過台数</small><strong id="passed">0 台</strong></div>
+        <div class="metric"><small>現在の待ち台数</small><strong id="queued">0 台</strong></div>
+      </div>
+      <p class="note">モデル簡略化のため、車は一定の確率で到着し、青信号の方向から一定間隔で交差点を通過します。実際の道路交通を正確に予測するものではありません。</p>
+    </section>
+    <aside class="panel controls">
+      <h2 style="margin:0">設定</h2>
+      <div class="control">
+        <label for="greenNS">南北の青信号 <span id="greenNSValue">30 秒</span></label>
+        <input id="greenNS" type="range" min="10" max="90" step="5" value="30">
+      </div>
+      <div class="control">
+        <label for="greenEW">東西の青信号 <span id="greenEWValue">30 秒</span></label>
+        <input id="greenEW" type="range" min="10" max="90" step="5" value="30">
+      </div>
+      <div class="control">
+        <label for="arrival">交通量 <span id="arrivalValue">標準</span></label>
+        <input id="arrival" type="range" min="1" max="5" step="1" value="3">
+        <div class="note">少ない ← → 多い</div>
+      </div>
+      <div class="control">
+        <label for="duration">計測時間 <span id="durationValue">300 秒</span></label>
+        <input id="duration" type="range" min="60" max="900" step="60" value="300">
+      </div>
+      <div class="buttons">
+        <button class="primary" id="startBtn">▶ 開始</button>
+        <button id="pauseBtn" disabled>⏸ 一時停止</button>
+        <button id="resetBtn">↺ リセット</button>
+      </div>
+      <hr style="border:0;border-top:1px solid #e3e8f0;width:100%">
+      <h2 style="margin:0">時間配分を自動比較</h2>
+      <p class="note" style="margin:0">南北・東西の青信号を複数パターンで試し、平均待ち時間が最短の設定を探します。</p>
+      <button class="primary" id="optimizeBtn">🧪 最適な時間配分を探す</button>
+      <div id="optimizationResult" class="results"><div class="note">「最適な時間配分を探す」を押すと比較結果が表示されます。</div></div>
+    </aside>
+  </div>
+</main>
+<script>
+(() => {
+  "use strict";
+  const canvas = document.getElementById("scene");
+  const ctx = canvas.getContext("2d");
+  const $ = id => document.getElementById(id);
+  const state = {
+    time: 0, running: false, lastFrame: 0, accumulator: 0,
+    phase: "NS", phaseElapsed: 0, cars: {N:[],S:[],E:[],W:[]},
+    passed: 0, totalWait: 0, completedWaits: 0, arrivalCarry: {N:0,S:0,E:0,W:0},
+    duration: 300, greenNS: 30, greenEW: 30, arrivalLevel: 3
+  };
+  const lane = {N:{x:370,y:0,dx:0,dy:1}, S:{x:430,y:600,dx:0,dy:-1},
+                W:{x:0,y:270,dx:1,dy:0}, E:{x:800,y:330,dx:-1,dy:0}};
+  const approachOrder = ["N","S","E","W"];
+  function readControls(){
+    state.greenNS = +$("greenNS").value;
+    state.greenEW = +$("greenEW").value;
+    state.arrivalLevel = +$("arrival").value;
+    state.duration = +$("duration").value;
+    $("greenNSValue").textContent = state.greenNS + " 秒";
+    $("greenEWValue").textContent = state.greenEW + " 秒";
+    $("arrivalValue").textContent = ["","かなり少ない","少なめ","標準","多め","かなり多い"][state.arrivalLevel];
+    $("durationValue").textContent = state.duration + " 秒";
+  }
+  function reset(){
+    state.time=0; state.phase="NS"; state.phaseElapsed=0; state.passed=0;
+    state.totalWait=0; state.completedWaits=0; state.accumulator=0;
+    state.cars={N:[],S:[],E:[],W:[]}; state.arrivalCarry={N:0,S:0,E:0,W:0};
+    state.running=false; state.lastFrame=0;
+    $("startBtn").disabled=false; $("pauseBtn").disabled=true; $("pauseBtn").textContent="⏸ 一時停止";
+    updateUI(); draw();
+  }
+  function greenFor(dir){ return state.phase === "NS" ? (dir==="N"||dir==="S") : (dir==="E"||dir==="W"); }
+  function tick(dt){
+    const target = Math.min(state.time + dt, state.duration);
+    const step = target - state.time;
+    if(step<=0){finish();return;}
+    // 到着率は交通量スライダーで変更。方向ごとに少しずつランダムな到着を発生させる。
+    const rate = 0.018 + state.arrivalLevel*0.012; // 1秒あたり1方向の平均到着確率
+    for(const d of approachOrder){
+      state.arrivalCarry[d] += rate*step;
+      while(state.arrivalCarry[d] >= 1){
+        state.arrivalCarry[d] -= 1;
+        state.cars[d].push({arrived:state.time, wait:0, id:Math.random()});
+      }
+      // 小さな確率で到着。確率過程を簡略化したモデル。
+      if(Math.random() < rate*step) state.cars[d].push({arrived:state.time, wait:0, id:Math.random()});
+    }
+    state.phaseElapsed += step;
+    const phaseLength = state.phase==="NS" ? state.greenNS : state.greenEW;
+    if(state.phaseElapsed >= phaseLength){
+      state.phase = state.phase==="NS" ? "EW" : "NS";
+      state.phaseElapsed = 0;
+    }
+    for(const d of approachOrder){
+      const q=state.cars[d];
+      if(greenFor(d) && q.length){
+        // 青信号中はおよそ2.2秒ごとに1台通過
+        q[0].wait += step;
+        q[0].service = (q[0].service || 0) + step;
+        while(q.length && q[0].service >= 2.2){
+          const car=q.shift();
+          state.passed++;
+          state.totalWait += Math.max(0,state.time-car.arrived);
+          state.completedWaits++;
+        }
+      } else {
+        for(const car of q) car.wait += step;
+      }
+    }
+    state.time = target;
+    if(state.time >= state.duration-1e-7) finish();
+  }
+  function finish(){
+    state.running=false;
+    $("startBtn").disabled=false; $("pauseBtn").disabled=true;
+    $("signalStatus").textContent += " ／ 計測終了";
+    updateUI();
+  }
+  function updateUI(){
+    const queued=Object.values(state.cars).reduce((s,q)=>s+q.length,0);
+    $("clock").textContent=state.time.toFixed(1)+" 秒";
+    $("avgWait").textContent=(state.completedWaits ? state.totalWait/state.completedWaits : 0).toFixed(1)+" 秒";
+    $("passed").textContent=state.passed+" 台";
+    $("queued").textContent=queued+" 台";
+    $("signalStatus").textContent=(state.phase==="NS"?"南北：青 ／ 東西：赤":"南北：赤 ／ 東西：青")+
+      "　（切替まで "+Math.max(0,((state.phase==="NS"?state.greenNS:state.greenEW)-state.phaseElapsed)).toFixed(1)+" 秒）";
+  }
+  function drawCar(x,y,vertical,color){
+    ctx.save(); ctx.translate(x,y);
+    if(vertical) ctx.rotate(Math.PI/2);
+    ctx.fillStyle="#263449"; ctx.fillRect(-8,-15,16,30);
+    ctx.fillStyle=color; ctx.fillRect(-6,-12,12,20);
+    ctx.fillStyle="#dbeafe"; ctx.fillRect(-5,-9,10,6);
+    ctx.fillStyle="#f8fafc"; ctx.fillRect(-6,9,3,3); ctx.fillRect(3,9,3,3);
+    ctx.restore();
+  }
+  function drawSignal(x,y,isGreen){
+    ctx.fillStyle="#1b2432"; ctx.beginPath();ctx.roundRect(x-13,y-24,26,48,7);ctx.fill();
+    ctx.fillStyle=isGreen?"#27d17f":"#5b2630";ctx.beginPath();ctx.arc(x,y,8,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle=isGreen?"#244b39":"#ef4455";ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.fill();
+  }
+  function draw(){
+    ctx.clearRect(0,0,800,600);
+    ctx.fillStyle="#b9d5ad";ctx.fillRect(0,0,800,600);
+    // roads
+    ctx.fillStyle="#454d59";ctx.fillRect(280,0,240,600);ctx.fillRect(0,180,800,240);
+    // lane markings
+    ctx.strokeStyle="#f6f0cf";ctx.lineWidth=3;ctx.setLineDash([18,16]);
+    ctx.beginPath();ctx.moveTo(400,0);ctx.lineTo(400,180);ctx.moveTo(400,420);ctx.lineTo(400,600);
+    ctx.moveTo(0,300);ctx.lineTo(280,300);ctx.moveTo(520,300);ctx.lineTo(800,300);ctx.stroke();ctx.setLineDash([]);
+    // stop lines
+    ctx.strokeStyle="#fff";ctx.lineWidth=5;ctx.beginPath();
+    ctx.moveTo(280,235);ctx.lineTo(355,235);ctx.moveTo(445,365);ctx.lineTo(520,365);
+    ctx.moveTo(335,180);ctx.lineTo(335,255);ctx.moveTo(465,345);ctx.lineTo(465,420);ctx.stroke();
+    // intersection
+    ctx.fillStyle="#505966";ctx.fillRect(335,235,130,130);
+    drawSignal(305,205,state.phase==="NS");drawSignal(495,395,state.phase==="NS");
+    drawSignal(495,205,state.phase==="EW");drawSignal(305,395,state.phase==="EW");
+    // queued cars drawn along approaches; first car nearest stop line
+    const colors=["#e85d5d","#4d91e8","#f3bd4b","#8e6bd8","#45b88a","#ed8d48"];
+    state.cars.N.forEach((c,i)=>drawCar(370,215-i*34,false,colors[i%colors.length]));
+    state.cars.S.forEach((c,i)=>drawCar(430,385+i*34,false,colors[(i+2)%colors.length]));
+    state.cars.W.forEach((c,i)=>drawCar(315-i*34,270,true,colors[(i+1)%colors.length]));
+    state.cars.E.forEach((c,i)=>drawCar(485+i*34,330,true,colors[(i+3)%colors.length]));
+    ctx.fillStyle="#ffffff";ctx.font="bold 15px sans-serif";
+    ctx.fillText("南",375,25);ctx.fillText("北",375,580);ctx.fillText("西",20,260);ctx.fillText("東",755,260);
+  }
+  function frame(ts){
+    if(!state.lastFrame) state.lastFrame=ts;
+    const elapsed=Math.min((ts-state.lastFrame)/1000,0.08);
+    state.lastFrame=ts;
+    if(state.running){
+      state.accumulator += elapsed;
+      while(state.accumulator >= 0.1 && state.running){
+        tick(0.1);state.accumulator-=0.1;
+      }
+    }
+    draw();updateUI();
+    requestAnimationFrame(frame);
+  }
+  $("startBtn").addEventListener("click",()=>{
+    if(state.time>=state.duration) reset();
+    readControls();state.running=true;state.lastFrame=0;
+    $("startBtn").disabled=true;$("pauseBtn").disabled=false;
+  });
+  $("pauseBtn").addEventListener("click",()=>{
+    state.running=!state.running;
+    $("pauseBtn").textContent=state.running?"⏸ 一時停止":"▶ 再開";
+    $("startBtn").disabled=state.running;
+  });
+  $("resetBtn").addEventListener("click",()=>{readControls();reset();});
+  ["greenNS","greenEW","arrival","duration"].forEach(id=>$(id).addEventListener("input",readControls));
+  function evaluate(ns,ew,level,duration){
+    // 同じ候補を公平に比較するため、候補ごとに同じ疑似乱数系列を使う。
+    let seed=123456;
+    const rand=()=>{seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;};
+    let time=0,phase="NS",elapsed=0,passed=0,totalWait=0,done=0;
+    const queues={N:[],S:[],E:[],W:[]},carry={N:0,S:0,E:0,W:0};
+    const rate=0.018+level*0.012;
+    while(time<duration-1e-9){
+      const dt=Math.min(.2,duration-time);
+      for(const d of approachOrder){
+        carry[d]+=rate*dt;
+        while(carry[d]>=1){carry[d]-=1;queues[d].push({arrived:time,service:0});}
+        if(rand()<rate*dt)queues[d].push({arrived:time,service:0});
+      }
+      elapsed+=dt;
+      if(elapsed >= (phase==="NS"?ns:ew)){phase=phase==="NS"?"EW":"NS";elapsed=0;}
+      for(const d of approachOrder){
+        const green=phase==="NS"?(d==="N"||d==="S"):(d==="E"||d==="W");
+        if(green&&queues[d].length){
+          queues[d][0].service+=dt;
+          while(queues[d].length&&queues[d][0].service>=2.2){
+            const c=queues[d].shift();passed++;totalWait+=time-c.arrived;done++;
+          }
+        }
+      }
+      time+=dt;
+    }
+    return {ns,ew,avg:done?totalWait/done:duration,passed,queued:Object.values(queues).reduce((a,q)=>a+q.length,0)};
+  }
+  $("optimizeBtn").addEventListener("click",()=>{
+    readControls();const btn=$("optimizeBtn");btn.disabled=true;btn.textContent="比較中…";
+    // UIを固めすぎないよう短い遅延後に計算
+    setTimeout(()=>{
+      const candidates=[];
+      for(let ns=15;ns<=60;ns+=15){
+        for(let ew=15;ew<=60;ew+=15){
+          candidates.push(evaluate(ns,ew,state.arrivalLevel,state.duration));
+        }
+      }
+      candidates.sort((a,b)=>a.avg-b.avg);
+      const best=candidates[0];
+      $("optimizationResult").innerHTML=
+        '<div class="result best"><div><strong>おすすめ設定</strong><br>南北 '+best.ns+' 秒 ／ 東西 '+best.ew+' 秒</div><div><strong>'+best.avg.toFixed(1)+' 秒</strong><br><small>平均待ち時間</small></div></div>'+
+        '<p class="note">比較した上位5パターン（平均待ち時間が短い順）</p>'+
+        '<table><thead><tr><th>南北 青</th><th>東西 青</th><th>平均待ち時間</th><th>通過台数</th></tr></thead><tbody>'+
+        candidates.slice(0,5).map((r,i)=>'<tr><td>'+r.ns+' 秒</td><td>'+r.ew+' 秒</td><td>'+r.avg.toFixed(1)+' 秒</td><td>'+r.passed+' 台</td></tr>').join('')+
+        '</tbody></table><p class="note">これは指定した交通量・計測時間・簡易モデル内での比較結果です。実際の最適値は交通量や道路条件によって変わります。</p>';
+      btn.disabled=false;btn.textContent="🧪 もう一度比較する";
+    },30);
+  });
+  readControls();reset();requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
